@@ -35,11 +35,11 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 	/* Add/Sub (immediate)
 	 * Format: [sf:1] [op:1] [S:1] 100010 [sh:1] [imm12:12] [Rn:5] [Rd:5]
 	 */
-	if extractBits(raw, 28, 24) == 0b100010 {
+	if extractBits(raw, 28, 23) == 0b100010 {
 		sf := extractBits(raw, 31, 31) == 1
 		op := extractBits(raw, 30, 30)
 		s := extractBits(raw, 29, 29)
-		shift := extractBits(raw, 22, 22) * 12
+		shift := extractBits(raw, 22, 22) * 16
 		imm12 := extractBits(raw, 21, 10) << shift
 		rn := extractBits(raw, 9, 5)
 		rd := extractBits(raw, 4, 0)
