@@ -7,12 +7,23 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+type ViewState int8
+
+const (
+	ViewText ViewState = iota
+	ViewData
+)
+
 type UIModel struct {
-	stream  []InstructionItem
-	cursor  int
-	history []int // Stack for tracking jumps
-	height  int
-	width   int
+	stream     []InstructionItem
+	cursor     int
+	history    []int // Stack for tracking jumps
+	height     int
+	width      int
+	format     string
+	viewState  ViewState
+	dataSecs   []DataSection
+	dataCursor int
 }
 
 func (m UIModel) Init() tea.Cmd {
@@ -74,7 +85,7 @@ func (m UIModel) View() string {
 	var b strings.Builder
 
 	header := "| [j/k/pgup/pgdn] Move  [Enter] Follow  [Esc] Back  [q] Quit "
-	b.WriteString(fmt.Sprintf("%s %s\n%s\n", getFileFormat(), header, strings.Repeat("─", len(header))))
+	b.WriteString(fmt.Sprintf("%s %s\n%s\n", m.format, header, strings.Repeat("─", len(header))))
 
 	// Calculate sliding window
 	viewRange := m.height - 4
