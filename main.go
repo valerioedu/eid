@@ -72,7 +72,15 @@ func loadBinary(path string) ([]byte, uint64, string, []DataSection, error) {
 			return nil, 0, "", nil, fmt.Errorf("failed reading .text section: %w", err)
 		}
 
-		return data, sec.Addr, meta, nil, nil
+		var dataSecs []DataSection
+		for _, s := range elfFile.Sections {
+			if s.Name == ".rodata" || s.Name == ".data" || s.Name == ".bss" {
+				d, _ := s.Data()
+				dataSecs = append(dataSecs, DataSection{Name: s.Name, Address: s.Addr, Data: d})
+			}
+		}
+
+		return data, sec.Addr, meta, dataSecs, nil
 	}
 
 	if machoFile, err := macho.Open(path); err == nil {
@@ -129,10 +137,10 @@ func loadBinary(path string) ([]byte, uint64, string, []DataSection, error) {
 	// Fallback: treat as a flat raw binary file
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, 0, "RAW", nil, err
+		return nil, 0, "raw", nil, err
 	}
 
-	return data, 0x0, "RAW | Unknown Arch | Flat Binary", nil, nil
+	return data, 0x0, "raw", nil, nil
 }
 
 func main() {
@@ -141,14 +149,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	data, baseAddr, format, _, err := loadBinary(os.Args[1])
+	data, baseAddr, format, dataSecs, err := loadBinary(os.Args[1])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading file: %v\n", err)
 		os.Exit(1)
-	}
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open file")
 	}
 
 	stream := DisassembleStream(data, baseAddr)
@@ -158,10 +162,13 @@ func main() {
 	}
 
 	p := tea.NewProgram(UIModel{
-		format: format,
-		stream: stream,
-		cursor: 0,
-	}, tea.WithAltScreen()) // Use AltScreen for standard full-screen TUI behavior
+		format:     format,
+		stream:     stream,
+		cursor:     0,
+		viewState:  ViewText,
+		dataSecs:   dataSecs,
+		dataCursor: 0,
+	}, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI Error: %v\n", err)
