@@ -15,6 +15,8 @@ def main():
         else:
             executable.unlink()
 
+    subprocess.run(["go", "get", "github.com/charmbracelet/bubbletea"])
+    subprocess.run(["go", "mod", "tidy"])
     subprocess.run(["go", "build"])
     subprocess.run(["./eid"])
 

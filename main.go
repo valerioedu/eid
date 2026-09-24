@@ -1,7 +1,12 @@
 package main
 
 import (
+	"debug/elf"
+	"debug/macho"
 	"fmt"
+	"os"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func extractBits(inst uint32, high, low uint) uint32 {
@@ -37,72 +42,88 @@ func regName(reg uint32, is64Bit bool, isSP bool) string {
 	return fmt.Sprintf("%s%d", prefix, reg)
 }
 
-// TestBinary contains 12 instructions (48 bytes) representing:
-//
-// 0x400000: sub  sp, sp, #0x20       ; Allocate stack frame
-// 0x400004: movz x0, #0x1337        ; Load lower 16 bits of immediate
-// 0x400008: movk x0, #0x42, lsl #16 ; Insert next 16 bits
-// 0x40000c: movz x1, #0xa           ; Load loop/counter value
-// 0x400010: add  x0, x0, #0x1       ; Increment x0
-// 0x400014: subs w1, w1, #0x1       ; Decrement w1 and set flags
-// 0x400018: b    0x400024           ; Jump forward over unreachable code
-// 0x40001c: movz x2, #0xdead        ; [Skipped target]
-// 0x400020: add  x0, x0, #0xff      ; [Skipped target]
-// 0x400024: add  sp, sp, #0x20       ; [Branch Target] Restore stack pointer
-// 0x400028: bl   0x40002c           ; Call next instruction (sets link register)
-// 0x40002c: ret                     ; Return
-var TestBinary = []byte{
-	// 0x400000: sub sp, sp, #0x20 (d10083ff)
-	0xff, 0x83, 0x00, 0xd1,
+func loadBinary(path string) ([]byte, uint64, error) {
+	// 1. Try reading as an ELF binary first
+	elfFile, err := elf.Open(path)
+	machoFile, err2 := macho.Open(path)
+	if err == nil {
+		defer elfFile.Close()
 
-	// 0x400004: movz x0, #0x1337 (d28266e0)
-	0xe0, 0x66, 0x82, 0xd2,
+		if elfFile.Machine != elf.EM_AARCH64 {
+			return nil, 0, fmt.Errorf("file is an ELF binary, but not AArch64 (machine: %s)", elfFile.Machine)
+		}
 
-	// 0x400008: movk x0, #0x42, lsl #16 (f2a00840)
-	0x40, 0x08, 0xa0, 0xf2,
+		sec := elfFile.Section(".text")
+		if sec == nil {
+			return nil, 0, fmt.Errorf("ELF has no .text section")
+		}
 
-	// 0x40000c: movz x1, #0xa (d2800141)
-	0x41, 0x01, 0x80, 0xd2,
+		data, err := sec.Data()
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed reading .text section: %w", err)
+		}
+		return data, sec.Addr, nil
+	} else if err2 == nil {
+		defer machoFile.Close()
 
-	// 0x400010: add x0, x0, #0x1 (91000400)
-	0x00, 0x04, 0x00, 0x91,
+		sec := machoFile.Section("__text")
+		if sec == nil {
+			return nil, 0, fmt.Errorf("mach-o has no __text section")
+		}
 
-	// 0x400014: subs w1, w1, #0x1 (71000421)
-	0x21, 0x04, 0x00, 0x71,
+		data, err := sec.Data()
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed reading __text section: %s", err)
+		}
 
-	// 0x400018: b 0x400024 (+12 bytes / 3 instructions) (14000003)
-	0x03, 0x00, 0x00, 0x14,
+		sec2 := machoFile.Section("__stubs")
+		data2, err := sec2.Data()
+		for i := 0; i < len(data2); i++ {
+			data = append(data, data2[i])
+		}
 
-	// 0x40001c: movz x2, #0xdead (d29bd5a2)
-	0xa2, 0xd5, 0x9b, 0xd2,
+		return data, sec.Addr, nil
+	}
 
-	// 0x400020: add x0, x0, #0xff (9103fc00)
-	0x00, 0xfc, 0x03, 0x91,
+	// 2. Fallback: treat as a flat raw binary file
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0, err
+	}
 
-	// 0x400024: add sp, sp, #0x20 (910083ff)
-	0xff, 0x83, 0x00, 0x91,
-
-	// 0x400028: bl 0x40002c (+4 bytes) (94000001)
-	0x01, 0x00, 0x00, 0x94,
-
-	// 0x40002c: ret (d65f03c0)
-	0xc0, 0x03, 0x5f, 0xd6,
+	return data, 0x0, nil
 }
 
-const BaseAddress = uint64(0x00400000)
-
 func main() {
-	stream := DisassembleStream(TestBinary, BaseAddress)
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: %s <path-to-binary>\n", os.Args[0])
+		os.Exit(1)
+	}
 
-	fmt.Printf("%-10s  %-8s  %-8s %s\n", "ADDRESS", "BYTES", "MNEMONIC", "OPERANDS")
-	fmt.Println("--------------------------------------------------")
+	data, baseAddr, err := loadBinary(os.Args[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
-	for _, item := range stream {
-		fmt.Printf("0x%08x  %08x  %-8s %s\n",
-			item.Address,
-			item.Raw,
-			item.Decoded.Mnemonics,
-			item.Decoded.Operands,
-		)
+	Data, err = os.ReadFile(os.Args[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open file")
+	}
+
+	stream := DisassembleStream(data, baseAddr)
+	if len(stream) == 0 {
+		fmt.Println("No executable instructions found.")
+		return
+	}
+
+	p := tea.NewProgram(UIModel{
+		stream: stream,
+		cursor: 0,
+	}, tea.WithAltScreen()) // Use AltScreen for standard full-screen TUI behavior
+
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI Error: %v\n", err)
+		os.Exit(1)
 	}
 }
