@@ -77,25 +77,120 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 		}
 	}
 
-	/* Branch Register (br)
-	 * Format: 11010110 [Rn:5]
+	/* Unconditional Branch (register): br, blr, ret, eret, drps, PAC variants (braa, blraa, retaa, etc.)
+	 * Format: 1101011 [opc:4] [op2:5] [op3:6] [Rn:5] [op4:5]
 	 */
-	if extractBits(raw, 31, 24) == 0b11010110 {
+	if extractBits(raw, 31, 25) == 0b1101011 {
 		opc := extractBits(raw, 24, 21)
-		if opc == 0 || opc == 1 {
-			var mnemonic string
-			if opc == 0 {
-				mnemonic = "br"
-			} else {
-				mnemonic = "blr"
+		op2 := extractBits(raw, 20, 16)
+		op3 := extractBits(raw, 15, 10)
+		rn := extractBits(raw, 9, 5)
+		op4 := extractBits(raw, 4, 0)
+
+		if op2 != 0b11111 {
+			return unknownInst(raw)
+		}
+
+		if op3 == 0b000000 && op4 == 0b00000 {
+			switch opc {
+			case 0b0000:
+				return DecodedInst{
+					Mnemonics: "br",
+					Operands:  regName(rn, true, false),
+				}
+			case 0b0001:
+				return DecodedInst{
+					Mnemonics: "blr",
+					Operands:  regName(rn, true, false),
+				}
+			case 0b0010:
+				if rn == 30 {
+					return DecodedInst{Mnemonics: "ret"}
+				}
+
+				return DecodedInst{
+					Mnemonics: "ret",
+					Operands:  regName(rn, true, false),
+				}
+			case 0b0100:
+				if rn == 0b11111 {
+					return DecodedInst{Mnemonics: "eret"}
+				}
+			case 0b0101:
+				if rn == 0b11111 {
+					return DecodedInst{Mnemonics: "drps"}
+				}
+			}
+		}
+
+		if op3 == 0b000010 || op3 == 0b000011 {
+			key := "a"
+			if (op3 & 1) == 1 {
+				key = "b"
 			}
 
-			rn := extractBits(raw, 9, 5)
-
-			return DecodedInst{
-				Mnemonics: mnemonic,
-				Operands:  fmt.Sprintf("%s", regName(rn, true, false)),
+			switch opc {
+			case 0b0000:
+				if op4 == 0b11111 {
+					return DecodedInst{
+						Mnemonics: "bra" + key + "z",
+						Operands:  regName(rn, true, false),
+					}
+				}
+			case 0b0001:
+				if op4 == 0b11111 {
+					return DecodedInst{
+						Mnemonics: "blra" + key + "z",
+						Operands:  regName(rn, true, false),
+					}
+				}
+			case 0b0010:
+				if rn == 0b11111 && op4 == 0b11111 {
+					return DecodedInst{Mnemonics: "reta" + key}
+				}
+			case 0b0100:
+				if rn == 0b11111 && op4 == 0b11111 {
+					return DecodedInst{Mnemonics: "ereta" + key}
+				}
+			case 0b1000:
+				return DecodedInst{
+					Mnemonics: "bra" + key,
+					Operands:  fmt.Sprintf("%s, %s", regName(rn, true, false), regName(op4, true, true)),
+				}
+			case 0b1001:
+				return DecodedInst{
+					Mnemonics: "blra" + key,
+					Operands:  fmt.Sprintf("%s, %s", regName(rn, true, false), regName(op4, true, true)),
+				}
 			}
+		}
+
+		return unknownInst(raw)
+	}
+
+	/* Test and Branch (immediate): op=0 -> TBZ, op=1 -> TBNZ
+	 * Format: [b5:1] 011011 [op:1] [b40:5] [imm14:14] [Rt:5]
+	 */
+	if extractBits(raw, 30, 25) == 0b011011 {
+		b5 := extractBits(raw, 31, 31)
+		op := extractBits(raw, 24, 24)
+		b40 := extractBits(raw, 23, 19)
+		imm14 := extractBits(raw, 18, 5)
+		rt := extractBits(raw, 4, 0)
+
+		mnemonic := "tbz"
+		if op == 1 {
+			mnemonic = "tbnz"
+		}
+
+		bitPos := (b5 << 5) | b40
+		offset := signExtend(imm14, 14) * 4
+		target := uint64(int64(pc) + offset)
+
+		return DecodedInst{
+			Mnemonics: mnemonic,
+			Operands:  fmt.Sprintf("%s, #%d, 0x%x", regName(rt, b5 == 1, false), bitPos, target),
+			Target:    target,
 		}
 	}
 
@@ -103,7 +198,14 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 	 * Format: [sf:1] [op:1] [S:1] 01011 [shift:2] 0 [Rm:5] [imm6:6] [Rn:5] [Rd:5]
 	 */
 	if extractBits(raw, 28, 24) == 0b01011 && extractBits(raw, 21, 21) == 0 {
+		shift := extractBits(raw, 23, 22)
+		imm6 := extractBits(raw, 15, 10)
 		sf := extractBits(raw, 31, 31) == 1
+
+		if shift == 0b11 || (!sf && imm6 >= 32) {
+			return unknownInst(raw)
+		}
+
 		op := extractBits(raw, 30, 30)
 		s := extractBits(raw, 29, 29)
 		rm := extractBits(raw, 20, 16)
@@ -119,9 +221,15 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 			mnemonic += "s"
 		}
 
+		operands := fmt.Sprintf("%s, %s, %s", regName(rd, sf, false), regName(rn, sf, false), regName(rm, sf, false))
+		if imm6 > 0 {
+			shiftNames := []string{"lsl", "lsr", "asr"}
+			operands += fmt.Sprintf(", %s #%d", shiftNames[shift], imm6)
+		}
+
 		return DecodedInst{
 			Mnemonics: mnemonic,
-			Operands:  fmt.Sprintf("%s, %s, %s", regName(rd, sf, true), regName(rn, sf, true), regName(rm, sf, false)),
+			Operands:  operands,
 		}
 	}
 
@@ -137,6 +245,21 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 		rn := extractBits(raw, 9, 5)
 		rd := extractBits(raw, 4, 0)
 
+		rdStr := regName(rd, sf, s == 0)
+		rnStr := regName(rn, sf, true)
+
+		if op == 1 && s == 1 && rd == 31 {
+			return DecodedInst{
+				Mnemonics: "cmp",
+				Operands:  fmt.Sprintf("%s, #0x%x", rnStr, imm12),
+			}
+		} else if op == 0 && s == 0 && imm12 == 0 && (rd == 31 || rn == 31) {
+			return DecodedInst{
+				Mnemonics: "mov",
+				Operands:  fmt.Sprintf("%s, %s", rdStr, rnStr),
+			}
+		}
+
 		mnemonic := "add"
 		if op == 1 {
 			mnemonic = "sub"
@@ -146,8 +269,6 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 			mnemonic += "s"
 		}
 
-		rdStr := regName(rd, sf, true)
-		rnStr := regName(rn, sf, true)
 		return DecodedInst{
 			Mnemonics: mnemonic,
 			Operands:  fmt.Sprintf("%s, %s, #0x%x", rdStr, rnStr, imm12),
@@ -222,31 +343,53 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 	 */
 	if extractBits(raw, 29, 27) == 0b101 && extractBits(raw, 25, 23) == 0b010 {
 		opc := extractBits(raw, 31, 30)
+		v := extractBits(raw, 26, 26)
 		l := extractBits(raw, 22, 22)
 		imm7 := extractBits(raw, 21, 15)
 		rt2 := extractBits(raw, 14, 10)
 		rn := extractBits(raw, 9, 5)
 		rt1 := extractBits(raw, 4, 0)
 
-		is64Bit := opc == 2
+		if (v == 0 && (opc&1) != 0) || (v == 1 && opc == 3) {
+			return unknownInst(raw)
+		}
+
 		mnemonic := "stp"
 		if l == 1 {
 			mnemonic = "ldp"
 		}
 
-		shift := uint(2)
-		if is64Bit {
-			shift = 3
-		}
-		offset := signExtend(imm7, 7) << shift
-
-		rt1Str := regName(rt1, is64Bit, false)
-		rt2Str := regName(rt2, is64Bit, false)
+		var shift uint
+		var rt1Str, rt2Str string
 		rnStr := regName(rn, true, true)
+
+		if v == 0 {
+			is64Bit := opc == 2
+			shift = 2
+			if is64Bit {
+				shift = 3
+			}
+			rt1Str = regName(rt1, is64Bit, false)
+			rt2Str = regName(rt2, is64Bit, false)
+		} else {
+			shift = uint(2 + opc)
+			rt1Str = regNameSIMD(rt1, opc+2)
+			rt2Str = regNameSIMD(rt2, opc+2)
+		}
+
+		offset := signExtend(imm7, 7) << shift
+		var opStr string
+		if offset < 0 {
+			opStr = fmt.Sprintf("%s, %s, [%s, #-0x%x]", rt1Str, rt2Str, rnStr, -offset)
+		} else if offset > 0 {
+			opStr = fmt.Sprintf("%s, %s, [%s, #0x%x]", rt1Str, rt2Str, rnStr, offset)
+		} else {
+			opStr = fmt.Sprintf("%s, %s, [%s]", rt1Str, rt2Str, rnStr)
+		}
 
 		return DecodedInst{
 			Mnemonics: mnemonic,
-			Operands:  fmt.Sprintf("%s, %s, [%s, #0x%x]", rt1Str, rt2Str, rnStr, offset),
+			Operands:  opStr,
 		}
 	}
 
@@ -259,6 +402,10 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 		hw := extractBits(raw, 22, 21) * 16
 		imm16 := extractBits(raw, 20, 5)
 		rd := extractBits(raw, 4, 0)
+
+		if !sf && hw >= 32 {
+			return unknownInst(raw)
+		}
 
 		var mnemonic string
 		switch opc {
@@ -286,22 +433,86 @@ func DecodeAArch64(raw uint32, pc uint64) DecodedInst {
 		}
 	}
 
-	/* Return (ret)
-	 * Format: 1101011 0 0 10 11111 000000 [Rn:5] 00000
+	/* No operation (nop)
+	 * Format: 11010101 00000011 00100000 00011111
 	 */
-	if raw&0xfffffc1f == 0xd65f0000 {
-		rn := extractBits(raw, 9, 5)
-		if rn == 30 {
+	if raw == 0b11010101000000110010000000011111 {
+		return DecodedInst{
+			Mnemonics: "nop",
+		}
+	}
+
+	/* Exception Generation: SVC, BRK
+	 * Format: 11010100 [opc:3] [imm16:16] [op2:3] [ll:2]
+	 */
+	if extractBits(raw, 31, 24) == 0b11010100 {
+		opc := extractBits(raw, 23, 21)
+		imm16 := extractBits(raw, 20, 5)
+		ll := extractBits(raw, 1, 0)
+
+		if extractBits(raw, 4, 2) != 0b000 {
+			return unknownInst(raw)
+		}
+
+		if opc == 0 && ll == 1 {
 			return DecodedInst{
-				Mnemonics: "ret",
-				Operands:  "",
+				Mnemonics: "svc",
+				Operands:  fmt.Sprintf("#0x%x", imm16),
 			}
 		}
 
-		return DecodedInst{
-			Mnemonics: "ret",
-			Operands:  regName(rn, true, false),
+		if opc == 1 && ll == 0 {
+			return DecodedInst{
+				Mnemonics: "brk",
+				Operands:  fmt.Sprintf("#0x%x", imm16),
+			}
 		}
+	}
+
+	/*
+	 * Format: 110101010000001100 [opc:2] [CRm:4] [op2:3] [Rd:5]
+	 */
+	if extractBits(raw, 31, 14) == 0b110101010000001100 {
+		opc := extractBits(raw, 13, 12)
+		crm := extractBits(raw, 11, 8)
+		op2 := extractBits(raw, 7, 5)
+		rd := extractBits(raw, 4, 0)
+
+		if opc == 0b01 && crm == 0b0000 {
+			switch op2 {
+			case 0b000:
+				return DecodedInst{
+					Mnemonics: "wfet",
+					Operands:  regName(rd, true, false),
+				}
+			case 0b001:
+				return DecodedInst{
+					Mnemonics: "wfit",
+					Operands:  regName(rd, true, false),
+				}
+			}
+		} else if opc == 0b10 {
+			if crm != 0b0000 || rd != 0b11111 {
+				return unknownInst(raw)
+			}
+
+			switch op2 {
+			case 0b010:
+				return DecodedInst{
+					Mnemonics: "wfe",
+				}
+			case 0b011:
+				return DecodedInst{
+					Mnemonics: "wfi",
+				}
+			case 0b001:
+				return DecodedInst{
+					Mnemonics: "yield",
+				}
+			}
+		}
+
+		return unknownInst(raw)
 	}
 
 	return unknownInst(raw)

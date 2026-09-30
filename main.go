@@ -15,6 +15,15 @@ type DataSection struct {
 	Data    []byte
 }
 
+const (
+	Simd8Bit   = 0
+	Simd16Bit  = 1
+	Simd32Bit  = 2
+	Simd64Bit  = 3
+	Simd128Bit = 4
+	SimdVector = 5
+)
+
 func extractBits(inst uint32, high, low uint) uint32 {
 	mask := (uint32(1) << (high - low + 1)) - 1
 	return (inst >> low) & mask
@@ -48,13 +57,24 @@ func regName(reg uint32, is64Bit bool, isSP bool) string {
 	return fmt.Sprintf("%s%d", prefix, reg)
 }
 
-func loadBinary(path string) ([]byte, uint64, string, []DataSection, error) {
-	// Try reading as an ELF/mach-o binary first
+func regNameSIMD(reg uint32, sizeClass uint32) string {
+	prefixes := []string{"b", "h", "s", "d", "q", "v"}
+	if sizeClass >= uint32(len(prefixes)) {
+		return fmt.Sprintf("v%d", reg)
+	}
+
+	return fmt.Sprintf("%s%d", prefixes[sizeClass], reg)
+}
+
+func loadBinary(path string) ([]byte, uint64, string, []DataSection, map[uint64]string, error) {
+	symbols := make(map[uint64]string)
+
+	// 1. Try ELF
 	if elfFile, err := elf.Open(path); err == nil {
 		defer elfFile.Close()
 
 		if elfFile.Machine != elf.EM_AARCH64 {
-			return nil, 0, "", nil, fmt.Errorf("file is an ELF binary, but not AArch64 (machine: %s)", elfFile.Machine)
+			return nil, 0, "", nil, nil, fmt.Errorf("file is an ELF binary, but not AArch64 (machine: %s)", elfFile.Machine)
 		}
 
 		arch := elfFile.Machine.String()
@@ -64,12 +84,12 @@ func loadBinary(path string) ([]byte, uint64, string, []DataSection, error) {
 
 		sec := elfFile.Section(".text")
 		if sec == nil {
-			return nil, 0, "", nil, fmt.Errorf("ELF has no .text section")
+			return nil, 0, "", nil, nil, fmt.Errorf("ELF has no .text section")
 		}
 
 		data, err := sec.Data()
 		if err != nil {
-			return nil, 0, "", nil, fmt.Errorf("failed reading .text section: %w", err)
+			return nil, 0, "", nil, nil, fmt.Errorf("failed reading .text section: %w", err)
 		}
 
 		var dataSecs []DataSection
@@ -80,20 +100,36 @@ func loadBinary(path string) ([]byte, uint64, string, []DataSection, error) {
 			}
 		}
 
-		return data, sec.Addr, meta, dataSecs, nil
+		if syms, err := elfFile.Symbols(); err == nil {
+			for _, sym := range syms {
+				if sym.Value != 0 && sym.Name != "" {
+					symbols[sym.Value] = sym.Name
+				}
+			}
+		}
+		if dynsyms, err := elfFile.DynamicSymbols(); err == nil {
+			for _, sym := range dynsyms {
+				if sym.Value != 0 && sym.Name != "" {
+					symbols[sym.Value] = sym.Name
+				}
+			}
+		}
+
+		return data, sec.Addr, meta, dataSecs, symbols, nil
 	}
 
+	// 2. Try Mach-O
 	if machoFile, err := macho.Open(path); err == nil {
 		defer machoFile.Close()
 
 		sec := machoFile.Section("__text")
 		if sec == nil {
-			return nil, 0, "", nil, fmt.Errorf("mach-o has no __text section")
+			return nil, 0, "", nil, nil, fmt.Errorf("mach-o has no __text section")
 		}
 
 		data, err := sec.Data()
 		if err != nil {
-			return nil, 0, "", nil, fmt.Errorf("failed reading __text section: %s", err)
+			return nil, 0, "", nil, nil, fmt.Errorf("failed reading __text section: %s", err)
 		}
 
 		var arch string
@@ -131,16 +167,24 @@ func loadBinary(path string) ([]byte, uint64, string, []DataSection, error) {
 			}
 		}
 
-		return data, sec.Addr, meta, dataSecs, nil
+		if machoFile.Symtab != nil {
+			for _, sym := range machoFile.Symtab.Syms {
+				if sym.Value != 0 && sym.Name != "" {
+					symbols[sym.Value] = sym.Name
+				}
+			}
+		}
+
+		return data, sec.Addr, meta, dataSecs, symbols, nil
 	}
 
-	// Fallback: treat as a flat raw binary file
+	// 3. Fallback raw binary
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, 0, "raw", nil, err
+		return nil, 0, "raw", nil, nil, err
 	}
 
-	return data, 0x0, "raw", nil, nil
+	return data, 0x0, "raw", nil, nil, nil
 }
 
 func main() {
@@ -149,7 +193,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	data, baseAddr, format, dataSecs, err := loadBinary(os.Args[1])
+	data, baseAddr, format, dataSecs, symbols, err := loadBinary(os.Args[1])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading file: %v\n", err)
 		os.Exit(1)
@@ -168,6 +212,7 @@ func main() {
 		viewState:  ViewText,
 		dataSecs:   dataSecs,
 		dataCursor: 0,
+		symbols:    symbols,
 	}, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

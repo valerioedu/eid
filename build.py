@@ -18,7 +18,7 @@ def main():
     subprocess.run(["go", "get", "github.com/charmbracelet/bubbletea"])
     subprocess.run(["go", "mod", "tidy"])
     subprocess.run(["go", "build"])
-    subprocess.run(["./eid"])
+    subprocess.run(["./eid", sys.argv[1]])
 
 if __name__ == "__main__":
     try:

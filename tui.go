@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type ViewState int8
@@ -12,6 +13,29 @@ type ViewState int8
 const (
 	ViewText ViewState = iota
 	ViewData
+)
+
+var (
+	statusBar = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("62")).
+			Bold(true).
+			Padding(0, 1)
+
+	selectedLine = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("229")).
+			Background(lipgloss.Color("57")).
+			Bold(true)
+
+	styleAddr     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	styleRaw      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	styleMnemonic = lipgloss.NewStyle().Foreground(lipgloss.Color("36")).Bold(true)
+	styleOperand  = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))
+	styleTarget   = lipgloss.NewStyle().Foreground(lipgloss.Color("204"))
+
+	styleDataHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true).Underline(true)
+	styleHex        = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	styleAscii      = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
 )
 
 type UIModel struct {
@@ -24,6 +48,7 @@ type UIModel struct {
 	viewState  ViewState
 	dataSecs   []DataSection
 	dataCursor int
+	symbols    map[uint64]string
 }
 
 func (m UIModel) Init() tea.Cmd {
@@ -106,6 +131,7 @@ func (m UIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+
 	return m, nil
 }
 
@@ -117,7 +143,7 @@ func (m UIModel) renderDataView() string {
 	sec := m.dataSecs[0]
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("--- Section: %s ---\n", sec.Name))
+	b.WriteString(styleDataHeader.Render(fmt.Sprintf("--- Section: %s ---", sec.Name)) + "\n\n")
 
 	bytesPerLine := 16
 	totalLines := (len(sec.Data) + bytesPerLine - 1) / bytesPerLine
@@ -131,6 +157,7 @@ func (m UIModel) renderDataView() string {
 	if start < 0 {
 		start = 0
 	}
+
 	end := start + viewRange
 	if end > totalLines {
 		end = totalLines
@@ -142,30 +169,43 @@ func (m UIModel) renderDataView() string {
 		if chunkEnd > len(sec.Data) {
 			chunkEnd = len(sec.Data)
 		}
+
 		chunk := sec.Data[offset:chunkEnd]
 
-		b.WriteString(fmt.Sprintf("%08x  ", sec.Address+uint64(offset)))
+		addrStr := fmt.Sprintf("%08x  ", sec.Address+uint64(offset))
 
+		var hexStr strings.Builder
 		var asciiStr strings.Builder
 		for j := 0; j < bytesPerLine; j++ {
 			if j < len(chunk) {
-				b.WriteString(fmt.Sprintf("%02x ", chunk[j]))
+				hexStr.WriteString(fmt.Sprintf("%02x ", chunk[j]))
 				if chunk[j] >= 32 && chunk[j] <= 126 {
 					asciiStr.WriteByte(chunk[j])
 				} else {
 					asciiStr.WriteByte('.')
 				}
 			} else {
-				b.WriteString("   ")
+				hexStr.WriteString("   ")
 				asciiStr.WriteByte(' ')
 			}
 
 			if j == 7 {
-				b.WriteString(" ")
+				hexStr.WriteString(" ")
 			}
 		}
 
-		b.WriteString(fmt.Sprintf(" |%s|\n", asciiStr.String()))
+		linePayload := fmt.Sprintf("%s%s |%s|", addrStr, hexStr.String(), asciiStr.String())
+
+		if i == m.dataCursor {
+			b.WriteString(selectedLine.Render(" ► "+linePayload) + "\n")
+		} else {
+			styledLine := fmt.Sprintf("   %s%s |%s|",
+				styleAddr.Render(addrStr),
+				styleHex.Render(hexStr.String()),
+				styleAscii.Render(asciiStr.String()),
+			)
+			b.WriteString(styledLine + "\n")
+		}
 	}
 
 	return b.String()
@@ -174,15 +214,14 @@ func (m UIModel) renderDataView() string {
 func (m UIModel) View() string {
 	var b strings.Builder
 
-	header := "| [Tab] Swap View  [j/k/pg] Move  [Enter] Follow  [Esc] Back  [q] Quit "
-	b.WriteString(fmt.Sprintf("%s %s\n%s\n", m.format, header, strings.Repeat("─", len(header)+len(m.format))))
+	headerText := fmt.Sprintf("%s | [Tab] Swap View  [j/k/pg] Move  [Enter] Follow  [Esc] Back  [q] Quit", m.format)
+	b.WriteString(statusBar.Width(m.width).Render(headerText) + "\n\n")
 
 	if m.viewState == ViewData {
 		b.WriteString(m.renderDataView())
 		return b.String()
 	}
 
-	// Calculate sliding window for Text View
 	viewRange := m.height - 4
 	if viewRange < 1 {
 		viewRange = 1
@@ -200,24 +239,38 @@ func (m UIModel) View() string {
 	for i := start; i < end; i++ {
 		item := m.stream[i]
 
-		marker := "  "
-		if i == m.cursor {
-			marker = "► "
-		}
+		addr := fmt.Sprintf("0x%08x", item.Address)
+		raw := fmt.Sprintf("%08x", item.Raw)
+		mnemonic := fmt.Sprintf("%-8s", item.Decoded.Mnemonics)
+		operands := fmt.Sprintf("%-20s", item.Decoded.Operands)
 
 		targetHint := ""
 		if item.Decoded.Target != 0 {
-			targetHint = " ↵"
+			if symName, exists := m.symbols[item.Decoded.Target]; exists {
+				targetHint = fmt.Sprintf(" <%s> ↵", symName)
+			} else {
+				targetHint = " ↵"
+			}
 		}
 
-		b.WriteString(fmt.Sprintf("%s0x%08x  %08x  %-8s %-20s%s\n",
-			marker,
-			item.Address,
-			item.Raw,
-			item.Decoded.Mnemonics,
-			item.Decoded.Operands,
-			targetHint,
-		))
+		currentLabel := ""
+		if symName, exists := m.symbols[item.Address]; exists {
+			currentLabel = fmt.Sprintf(" <%s>", symName)
+		}
+
+		if i == m.cursor {
+			selStr := fmt.Sprintf(" ► %s  %s  %s %s%s%s", addr, raw, mnemonic, operands, targetHint, currentLabel)
+			b.WriteString(selectedLine.Render(selStr) + "\n")
+		} else {
+			b.WriteString(fmt.Sprintf("   %s  %s  %s %s%s%s\n",
+				styleAddr.Render(addr),
+				styleRaw.Render(raw),
+				styleMnemonic.Render(mnemonic),
+				styleOperand.Render(operands),
+				styleTarget.Render(targetHint),
+				styleTarget.Render(currentLabel),
+			))
+		}
 	}
 
 	return b.String()
